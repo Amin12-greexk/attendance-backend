@@ -10,6 +10,8 @@ use App\Models\AttendanceHistory;
 use App\Services\AttendanceService;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
+use App\Http\Requests\ManualAttendanceRequest;
+use Carbon\Carbon;
 
 /**
  * @OA\Tag(
@@ -143,5 +145,34 @@ class AttendanceController extends Controller
         $logs = $query->latest()->paginate(15);
 
         return response()->json($logs);
+    }
+
+    public function storeManual(ManualAttendanceRequest $request)
+    {
+        // Cari absensi yang ada pada tanggal clock_in untuk karyawan tersebut
+        $attendance = Attendance::where('employee_id', $request->employee_id)
+            ->whereDate('clock_in', Carbon::parse($request->clock_in)->toDateString())
+            ->first();
+
+        if ($attendance) {
+            // Jika ada, update
+            $attendance->update([
+                'clock_in' => $request->clock_in,
+                'clock_out' => $request->clock_out,
+            ]);
+        } else {
+            // Jika tidak ada, buat baru
+            $attendance = Attendance::create([
+                'employee_id' => $request->employee_id,
+                'clock_in' => $request->clock_in,
+                'clock_out' => $request->clock_out,
+                'status' => 'Pending',
+            ]);
+        }
+
+        // Selalu hitung ulang statusnya
+        $this->attendanceService->calculateAttendanceStatus($attendance);
+
+        return response()->json(['message' => 'Manual attendance saved successfully', 'data' => $attendance]);
     }
 }

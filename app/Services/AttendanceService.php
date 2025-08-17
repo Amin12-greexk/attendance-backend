@@ -9,57 +9,67 @@ class AttendanceService
 {
     public function calculateAttendanceStatus(Attendance $attendance): Attendance
     {
-        $appTimezone = config('app.timezone');
+        $appTimezone = config('app.timezone', 'Asia/Jakarta');
         $department = $attendance->employee->department;
 
+        // Jika karyawan tidak memiliki departemen atau departemen tidak punya aturan, hentikan proses.
         if (!$department || !$department->max_clock_in_time || !$department->max_clock_out_time) {
+            $attendance->status = 'No Rule';
             $attendance->save();
             return $attendance;
         }
 
+        // 1. Parse semua waktu yang relevan dan pastikan zona waktunya konsisten.
         $clockInTime = Carbon::parse($attendance->clock_in, $appTimezone);
         $clockOutTime = $attendance->clock_out ? Carbon::parse($attendance->clock_out, $appTimezone) : null;
 
-        // batas maksimal clock in & clock out pada hari clock in
-        $maxClockIn = $clockInTime->copy()->startOfDay()->setTimeFromTimeString($department->max_clock_in_time);
-        $maxClockOut = $clockInTime->copy()->startOfDay()->setTimeFromTimeString($department->max_clock_out_time);
+        // 2. Buat waktu acuan (max_in dan max_out) pada tanggal yang sama dengan tanggal clock_in.
+        // Ini adalah cara paling andal untuk menghindari bug antar hari atau zona waktu.
+        $referenceDate = $clockInTime->toDateString();
+        $maxClockIn = Carbon::createFromFormat('Y-m-d H:i:s', $referenceDate . ' ' . $department->max_clock_in_time, $appTimezone);
+        $maxClockOut = Carbon::createFromFormat('Y-m-d H:i:s', $referenceDate . ' ' . $department->max_clock_out_time, $appTimezone);
 
-        // kalau jam keluar lebih kecil dari jam masuk (shift malam), tambahkan 1 hari
-        if ($maxClockOut->lessThan($maxClockIn)) {
-            $maxClockOut->addDay();
-        }
-
-        // reset nilai
+        // 3. Reset semua nilai menit sebelum menghitung ulang.
         $attendance->lateness_minutes = 0;
         $attendance->overtime_minutes = 0;
         $attendance->early_leave_minutes = 0;
-        $attendance->status = null;
 
-        // hitung keterlambatan
-        if ($clockInTime->greaterThan($maxClockIn)) {
+        // 4. Hitung keterlambatan.
+        if ($clockInTime->isAfter($maxClockIn)) {
             $attendance->lateness_minutes = $clockInTime->diffInMinutes($maxClockIn);
         }
 
-        // hitung pulang cepat / lembur
+        // 5. Hitung pulang cepat atau lembur (hanya jika sudah clock out).
         if ($clockOutTime) {
-            if ($clockOutTime->lessThan($maxClockOut)) {
+            if ($clockOutTime->isBefore($maxClockOut)) {
                 $attendance->early_leave_minutes = $maxClockOut->diffInMinutes($clockOutTime);
-            } elseif ($clockOutTime->greaterThan($maxClockOut)) {
+            } elseif ($clockOutTime->isAfter($maxClockOut)) {
                 $attendance->overtime_minutes = $clockOutTime->diffInMinutes($maxClockOut);
             }
         }
 
-        // tentukan status
-        if ($attendance->lateness_minutes > 0 && $attendance->early_leave_minutes > 0) {
-            $attendance->status = 'Late & Early Leave';
-        } elseif ($attendance->lateness_minutes > 0) {
-            $attendance->status = 'Late';
-        } elseif ($attendance->early_leave_minutes > 0) {
-            $attendance->status = 'Early Leave';
-        } elseif ($attendance->overtime_minutes > 0) {
-            $attendance->status = 'Overtime';
+        // 6. Tentukan Status FINAL berdasarkan nilai menit yang sudah dihitung.
+        $isLate = $attendance->lateness_minutes > 0;
+        $isEarly = $attendance->early_leave_minutes > 0;
+        $isOvertime = $attendance->overtime_minutes > 0;
+
+        $statusParts = [];
+        if ($isLate) {
+            $statusParts[] = 'Late';
+        }
+
+        // Lembur dan Pulang Cepat adalah kondisi yang saling eksklusif.
+        if ($isEarly) {
+            $statusParts[] = 'Early Leave';
+        } elseif ($isOvertime) {
+            $statusParts[] = 'Overtime';
+        }
+
+        if (empty($statusParts)) {
+            // Hanya On Time jika sudah clock out dan tidak ada penyimpangan.
+            $attendance->status = $clockOutTime ? 'On Time' : 'In Office';
         } else {
-            $attendance->status = 'On Time';
+            $attendance->status = implode(' & ', $statusParts);
         }
 
         $attendance->save();

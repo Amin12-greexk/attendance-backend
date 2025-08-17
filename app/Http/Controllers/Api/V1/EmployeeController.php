@@ -7,6 +7,7 @@ use App\Http\Requests\StoreEmployeeRequest;
 use App\Http\Requests\UpdateEmployeeRequest;
 use App\Models\Employee;
 use Illuminate\Http\Response;
+use Illuminate\Http\Request;
 
 /**
  * @OA\Tag(
@@ -24,8 +25,14 @@ class EmployeeController extends Controller
      * @OA\Response(response=200, description="Successful operation"),
      * )
      */
-    public function index()
+    public function index(Request $request) // <-- Tambahkan Request $request
     {
+        // Jika ada parameter ?all=true, kembalikan semua data
+        if ($request->query('all')) {
+            return Employee::with('department')->orderBy('name')->get();
+        }
+
+        // Jika tidak, kembalikan data dengan paginasi (default)
         return Employee::with('department')->paginate(10);
     }
 

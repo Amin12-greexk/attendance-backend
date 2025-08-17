@@ -25,4 +25,6 @@ Route::prefix('v1')->group(function () {
 
     // Rute untuk mendapatkan status absensi terakhir karyawan
     Route::get('employees/{employee}/latest-attendance', [EmployeeController::class, 'getLatestAttendance']);
+
+    Route::post('attendance/manual-entry', [AttendanceController::class, 'storeManual']);
 });
