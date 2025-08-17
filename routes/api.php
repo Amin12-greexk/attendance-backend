@@ -14,9 +14,11 @@ Route::get('/user', function (Request $request) {
 
 // Grup untuk API Versi 1
 Route::prefix('v1')->group(function () {
+    Route::get('employees/all', [EmployeeController::class, 'all']);
     // Rute CRUD untuk Departments & Employees
     Route::apiResource('departments', DepartmentController::class);
     Route::apiResource('employees', EmployeeController::class);
+
 
     // Rute khusus untuk Attendance
     Route::post('attendance/clock-in', [AttendanceController::class, 'clockIn']);

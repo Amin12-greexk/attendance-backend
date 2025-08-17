@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\Attendance;
 use Carbon\Carbon;
+use Illuminate\Support\Facades\Log;
 
 class AttendanceService
 {
@@ -12,67 +13,110 @@ class AttendanceService
         $appTimezone = config('app.timezone', 'Asia/Jakarta');
         $department = $attendance->employee->department;
 
-        // Jika karyawan tidak memiliki departemen atau departemen tidak punya aturan, hentikan proses.
-        if (!$department || !$department->max_clock_in_time || !$department->max_clock_out_time) {
+        // 0) Validasi rule minimal (tetap seperti logika kamu)
+        if (!$department || !$department->max_clock_in_time) {
             $attendance->status = 'No Rule';
+            $attendance->lateness_minutes = 0;
+            $attendance->early_leave_minutes = 0;
+            $attendance->overtime_minutes = 0;
             $attendance->save();
             return $attendance;
         }
 
-        // 1. Parse semua waktu yang relevan dan pastikan zona waktunya konsisten.
+        // 1) Parse clock in/out (pakai timezone app – sama seperti logika kamu)
         $clockInTime = Carbon::parse($attendance->clock_in, $appTimezone);
         $clockOutTime = $attendance->clock_out ? Carbon::parse($attendance->clock_out, $appTimezone) : null;
 
-        // 2. Buat waktu acuan (max_in dan max_out) pada tanggal yang sama dengan tanggal clock_in.
-        // Ini adalah cara paling andal untuk menghindari bug antar hari atau zona waktu.
-        $referenceDate = $clockInTime->toDateString();
-        $maxClockIn = Carbon::createFromFormat('Y-m-d H:i:s', $referenceDate . ' ' . $department->max_clock_in_time, $appTimezone);
-        $maxClockOut = Carbon::createFromFormat('Y-m-d H:i:s', $referenceDate . ' ' . $department->max_clock_out_time, $appTimezone);
+        // 2) Bangun patokan Max Clock In (tetap dengan try/catch seperti logika kamu)
+        try {
+            $inTimeString = Carbon::parse($department->max_clock_in_time)->format('H:i:s');
+            $maxClockInStr = $clockInTime->toDateString() . ' ' . $inTimeString;
+            $maxClockIn = Carbon::parse($maxClockInStr, $appTimezone);
+        } catch (\Exception $e) {
+            Log::error('Invalid time format for department ID ' . $department->id . ' (max_clock_in_time): ' . $department->max_clock_in_time);
+            $attendance->status = 'Invalid Rule';
+            $attendance->save();
+            return $attendance;
+        }
 
-        // 3. Reset semua nilai menit sebelum menghitung ulang.
+        // 3) (BARU) Bangun patokan Max Clock Out (opsional: kalau tersedia)
+        $maxClockOut = null;
+        if (!empty($department->max_clock_out_time)) {
+            try {
+                $outTimeString = Carbon::parse($department->max_clock_out_time)->format('H:i:s');
+                $baseOutDate = $clockOutTime ? $clockOutTime->toDateString() : $clockInTime->toDateString();
+                $maxClockOutStr = $baseOutDate . ' ' . $outTimeString;
+                $maxClockOut = Carbon::parse($maxClockOutStr, $appTimezone);
+
+                // Dukungan shift lintas hari (contoh: max_in 15:00, max_out 00:00 → next day)
+                if ($maxClockOut->lessThanOrEqualTo($maxClockIn)) {
+                    $maxClockOut->addDay();
+                }
+            } catch (\Exception $e) {
+                Log::error('Invalid time format for department ID ' . $department->id . ' (max_clock_out_time): ' . $department->max_clock_out_time);
+                $maxClockOut = null; // lanjut tanpa perhitungan early/overtime
+            }
+        }
+
+        // --- LOGGING UNTUK DEBUGGING (dipertahankan & diperluas) ---
+        Log::info('--- Attendance Calculation ---');
+        Log::info('Employee ID: ' . $attendance->employee_id);
+        Log::info('Clock In Time: ' . $clockInTime->toDateTimeString());
+        if ($clockOutTime)
+            Log::info('Clock Out Time: ' . $clockOutTime->toDateTimeString());
+        Log::info('Max Clock In Time: ' . $maxClockIn->toDateTimeString());
+        if ($maxClockOut)
+            Log::info('Max Clock Out Time: ' . $maxClockOut->toDateTimeString());
+        // -----------------------------------------------------------
+
+        // 4) Reset nilai menit (tetap)
         $attendance->lateness_minutes = 0;
         $attendance->overtime_minutes = 0;
         $attendance->early_leave_minutes = 0;
 
-        // 4. Hitung keterlambatan.
+        // 5) Hitung keterlambatan (tetap – prioritas logika kamu)
         if ($clockInTime->isAfter($maxClockIn)) {
-            $attendance->lateness_minutes = $clockInTime->diffInMinutes($maxClockIn);
+            // pakai true agar absolut (positif)
+            $attendance->lateness_minutes = $clockInTime->diffInMinutes($maxClockIn, true);
         }
+        Log::info('Is After (Late?): ' . ($clockInTime->isAfter($maxClockIn) ? 'Yes' : 'No'));
+        Log::info('Lateness (minutes): ' . $attendance->lateness_minutes);
 
-        // 5. Hitung pulang cepat atau lembur (hanya jika sudah clock out).
-        if ($clockOutTime) {
-            if ($clockOutTime->isBefore($maxClockOut)) {
-                $attendance->early_leave_minutes = $maxClockOut->diffInMinutes($clockOutTime);
-            } elseif ($clockOutTime->isAfter($maxClockOut)) {
-                $attendance->overtime_minutes = $clockOutTime->diffInMinutes($maxClockOut);
+        // 6) (BARU) Hitung Early Leave / Overtime jika clockOut & ada rule max out
+        if ($clockOutTime && $maxClockOut) {
+            if ($clockOutTime->lt($maxClockOut)) {
+                $attendance->early_leave_minutes = $maxClockOut->diffInMinutes($clockOutTime); // positif
+            } elseif ($clockOutTime->gt($maxClockOut)) {
+                $attendance->overtime_minutes = $clockOutTime->diffInMinutes($maxClockOut);   // positif
             }
         }
 
-        // 6. Tentukan Status FINAL berdasarkan nilai menit yang sudah dihitung.
-        $isLate = $attendance->lateness_minutes > 0;
-        $isEarly = $attendance->early_leave_minutes > 0;
-        $isOvertime = $attendance->overtime_minutes > 0;
+        Log::info('Early Leave (minutes): ' . $attendance->early_leave_minutes);
+        Log::info('Overtime (minutes): ' . $attendance->overtime_minutes);
 
-        $statusParts = [];
-        if ($isLate) {
-            $statusParts[] = 'Late';
-        }
-
-        // Lembur dan Pulang Cepat adalah kondisi yang saling eksklusif.
-        if ($isEarly) {
-            $statusParts[] = 'Early Leave';
-        } elseif ($isOvertime) {
-            $statusParts[] = 'Overtime';
-        }
-
-        if (empty($statusParts)) {
-            // Hanya On Time jika sudah clock out dan tidak ada penyimpangan.
-            $attendance->status = $clockOutTime ? 'On Time' : 'In Office';
+        // 7) Status FINAL (tetap berbasis keterlambatan; jika tidak telat baru lihat out)
+        if ($attendance->lateness_minutes > 0) {
+            $attendance->status = 'Late'; // <- prioritas utama (sesuai permintaanmu)
         } else {
-            $attendance->status = implode(' & ', $statusParts);
+            if ($clockOutTime) {
+                if ($attendance->early_leave_minutes > 0) {
+                    $attendance->status = 'Early Leave';
+                } elseif ($attendance->overtime_minutes > 0) {
+                    $attendance->status = 'Overtime';
+                } else {
+                    $attendance->status = 'On Time';
+                }
+            } else {
+                $attendance->status = 'In Office';
+            }
         }
 
+        Log::info('Final Status: ' . $attendance->status);
+        Log::info('--------------------------');
+
+        // 8) Simpan
         $attendance->save();
+
         return $attendance;
     }
 }

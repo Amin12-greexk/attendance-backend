@@ -12,6 +12,7 @@ use Illuminate\Http\Request;
 use Illuminate\Http\Response;
 use App\Http\Requests\ManualAttendanceRequest;
 use Carbon\Carbon;
+use Illuminate\Support\Facades\Log; // <-- TAMBAHKAN INI
 
 /**
  * @OA\Tag(
@@ -28,31 +29,14 @@ class AttendanceController extends Controller
         $this->attendanceService = $attendanceService;
     }
 
-    /**
-     * @OA\Post(
-     * path="/api/v1/attendance/clock-in",
-     * tags={"Attendance"},
-     * summary="Clock in an employee",
-     * @OA\RequestBody(
-     * required=true,
-     * description="Provide the employee ID to clock in",
-     * @OA\JsonContent(
-     * required={"employee_id"},
-     * @OA\Property(property="employee_id", type="integer", format="int64", example=1)
-     * )
-     * ),
-     * @OA\Response(response=201, description="Clock in successful"),
-     * @OA\Response(response=422, description="Validation error"),
-     * @OA\Response(response=400, description="Employee already clocked in today")
-     * )
-     */
+    // ... (fungsi clockIn, clockOut, getLog tidak berubah) ...
+
     public function clockIn(ClockInRequest $request)
     {
         $existingAttendance = Attendance::where('employee_id', $request->employee_id)
             ->whereDate('clock_in', today())
             ->first();
 
-        // Cek jika sudah ada absensi hari ini dan belum clock out
         if ($existingAttendance && $existingAttendance->clock_in && !$existingAttendance->clock_out) {
             return response()->json(['message' => 'Employee has already clocked in today and not clocked out.'], Response::HTTP_BAD_REQUEST);
         }
@@ -74,30 +58,12 @@ class AttendanceController extends Controller
         return response()->json(['message' => 'Clock in successful', 'data' => $attendance], Response::HTTP_CREATED);
     }
 
-    /**
-     * @OA\Put(
-     * path="/api/v1/attendance/clock-out",
-     * tags={"Attendance"},
-     * summary="Clock out an employee",
-     * @OA\RequestBody(
-     * required=true,
-     * description="Provide the employee ID to clock out",
-     * @OA\JsonContent(
-     * required={"employee_id"},
-     * @OA\Property(property="employee_id", type="integer", format="int64", example=1)
-     * )
-     * ),
-     * @OA\Response(response=200, description="Clock out successful"),
-     * @OA\Response(response=404, description="No active attendance found to clock out"),
-     * @OA\Response(response=422, description="Validation error")
-     * )
-     */
     public function clockOut(ClockOutRequest $request)
     {
         $attendance = Attendance::where('employee_id', $request->employee_id)
             ->whereNotNull('clock_in')
             ->whereNull('clock_out')
-            ->whereDate('clock_in', today()) // Pastikan hanya untuk hari ini
+            ->whereDate('clock_in', today())
             ->latest('clock_in')
             ->first();
 
@@ -118,16 +84,6 @@ class AttendanceController extends Controller
         return response()->json(['message' => 'Clock out successful', 'data' => $attendance]);
     }
 
-    /**
-     * @OA\Get(
-     * path="/api/v1/attendance-log",
-     * tags={"Attendance"},
-     * summary="Get attendance log with filters",
-     * @OA\Parameter(name="date", in="query", @OA\Schema(type="string", format="date", example="2025-08-15")),
-     * @OA\Parameter(name="department_id", in="query", @OA\Schema(type="integer", example=1)),
-     * @OA\Response(response=200, description="Successful operation"),
-     * )
-     */
     public function getLog(Request $request)
     {
         $query = Attendance::with('employee.department');
@@ -149,30 +105,28 @@ class AttendanceController extends Controller
 
     public function storeManual(ManualAttendanceRequest $request)
     {
-        // Cari absensi yang ada pada tanggal clock_in untuk karyawan tersebut
-        $attendance = Attendance::where('employee_id', $request->employee_id)
-            ->whereDate('clock_in', Carbon::parse($request->clock_in)->toDateString())
-            ->first();
+        $clockIn = Carbon::parse($request->clock_in, 'Asia/Jakarta')->setTimezone('UTC');
+        $clockOut = $request->clock_out
+            ? Carbon::parse($request->clock_out, 'Asia/Jakarta')->setTimezone('UTC')
+            : null;
 
-        if ($attendance) {
-            // Jika ada, update
-            $attendance->update([
-                'clock_in' => $request->clock_in,
-                'clock_out' => $request->clock_out,
-            ]);
-        } else {
-            // Jika tidak ada, buat baru
-            $attendance = Attendance::create([
+        $attendance = Attendance::updateOrCreate(
+            [
                 'employee_id' => $request->employee_id,
-                'clock_in' => $request->clock_in,
-                'clock_out' => $request->clock_out,
+                'clock_in' => $clockIn,
+            ],
+            [
+                'clock_out' => $clockOut,
                 'status' => 'Pending',
-            ]);
-        }
+            ]
+        );
 
-        // Selalu hitung ulang statusnya
         $this->attendanceService->calculateAttendanceStatus($attendance);
 
-        return response()->json(['message' => 'Manual attendance saved successfully', 'data' => $attendance]);
+        return response()->json([
+            'message' => 'Manual attendance saved successfully',
+            'data' => $attendance
+        ]);
     }
+
 }
